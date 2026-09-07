@@ -59,10 +59,25 @@ class YtdlController extends Controller
      */
     public function Index()
     {
-        $data = $this->dbconn->getYtdlByUidAndStatus($this->uid, [
+        $rows = $this->dbconn->getYtdlByUidAndStatus($this->uid, [
             Helper::STATUS['ACTIVE'],
             Helper::STATUS['WAITING'],
+            Helper::STATUS['COMPLETE'],
         ]);
+
+        $data = [];
+        $completeCutoff = time() - 8;
+        foreach ($rows as $row) {
+            $status = (int) ($row['status'] ?? Helper::STATUS['ACTIVE']);
+            if ($status === Helper::STATUS['COMPLETE']) {
+                $extra = isset($row['data']) ? $this->dbconn->getExtra($row['data']) : [];
+                if (!is_array($extra) || (int) ($extra['finished_at'] ?? 0) < $completeCutoff) {
+                    continue;
+                }
+            }
+            $data[] = $row;
+        }
+
         if (count($data) < 1) {
             return new JSONResponse([]);
         }
@@ -83,14 +98,15 @@ class YtdlController extends Controller
             $timestamp = isset($value['timestamp']) ? date("Y-m-d H:i:s", (int) $value['timestamp']) : '';
             $fileInfo = sprintf('<div class="ncd-file-info"><button id="icon-clipboard" class="icon-clipboard" data-text="%s"></button> %s | %s</div>', $link, $filesize, $timestamp);
 
+            $status = (int) ($value['status'] ?? Helper::STATUS['ACTIVE']);
             $tmp = [];
             $tmp['filename'] = [$filename, $fileInfo];
             $tmp['speed'] = explode("|", (string) ($value['speed'] ?? ''));
             $tmp['progress'] = (string) ($value['progress'] ?? '0%');
-            $tmp['status'] = $this->statusLabel((int) ($value['status'] ?? Helper::STATUS['ACTIVE']));
+            $tmp['status'] = $this->statusLabel($status);
             $tmp['actions'] = [];
 
-            if (!empty($extra['pid'])) {
+            if (in_array($status, [Helper::STATUS['ACTIVE'], Helper::STATUS['WAITING']], true) && !empty($extra['pid'])) {
                 $tmp['actions'][] = [
                     'name' => 'cancel',
                     'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Delete'),
@@ -158,7 +174,7 @@ class YtdlController extends Controller
                 return;
             }
 
-            $yt->markCurrentImporting();
+            $yt->markCurrentImporting($source);
 
             try {
                 $item = $this->mediaImporter->importFile(
@@ -169,7 +185,7 @@ class YtdlController extends Controller
                     false
                 );
                 $directImported[$source] = $item;
-                $yt->markCurrentImported((string) $item['name']);
+                $yt->markCurrentImported($source, (string) $item['name']);
             } catch (\Throwable $e) {
                 $directImportFailed = true;
                 $this->logger->error(
@@ -362,7 +378,7 @@ class YtdlController extends Controller
     {
         return match ($status) {
             Helper::STATUS['PAUSED'] => $this->l10n->t('Paused'),
-            Helper::STATUS['COMPLETE'] => $this->l10n->t('Complete'),
+            Helper::STATUS['COMPLETE'] => '✅',
             Helper::STATUS['WAITING'] => $this->l10n->t('Adding to Nextcloud…'),
             Helper::STATUS['ERROR'] => $this->l10n->t('Error'),
             default => $this->l10n->t('Downloading…'),
