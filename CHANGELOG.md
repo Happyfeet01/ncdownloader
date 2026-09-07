@@ -19,6 +19,7 @@ All notable changes to MediaFetch will be documented in this file.
 - Running yt-dlp jobs now expose a cancel action once their process ID is known; cancelled jobs are retained as failed history instead of being silently deleted.
 - Active aria2/HTTP/magnet downloads now expose a cancel action in addition to pause.
 - `Stop all downloads & reset` now keeps a live yt-dlp row visible when its process tree could not actually be terminated instead of falsely showing an empty queue, and it clears failed yt-dlp/aria2 history while preserving completed history.
+- Reset now handles privileged VPN wrappers correctly by terminating the www-data-owned yt-dlp/ffmpeg descendants first and allowing the root sudo/unshare/nsenter wrapper chain to unwind naturally.
 - Corrected the remaining aria2 action route to use the `mediafetch` route namespace.
 
 ## [1.0.1] - 2026-09-03
@@ -34,4 +35,3 @@ All notable changes to MediaFetch will be documented in this file.
 - Fixed yt-dlp jobs appearing inactive immediately after submitting a download.
 - Avoided false import errors while cleaning up temporary yt-dlp workspaces.
 - Made completed HTTP, magnet and torrent downloads appear in Nextcloud without requiring a manual `occ files:scan`.
-- Corrected the aria2 hook argument order (`GID`, file count, file path) and preserved paths containing spaces.
