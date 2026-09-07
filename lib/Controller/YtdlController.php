@@ -59,8 +59,26 @@ class YtdlController extends Controller
      */
     public function Index()
     {
-        $data = $this->dbconn->getYtdlByUid($this->uid);
-        if (!is_array($data) || count($data) < 1) {
+        $rows = $this->dbconn->getYtdlByUidAndStatus($this->uid, [
+            Helper::STATUS['ACTIVE'],
+            Helper::STATUS['WAITING'],
+            Helper::STATUS['COMPLETE'],
+        ]);
+
+        $data = [];
+        $completeCutoff = time() - 8;
+        foreach ($rows as $row) {
+            $status = (int) ($row['status'] ?? Helper::STATUS['ACTIVE']);
+            if ($status === Helper::STATUS['COMPLETE']) {
+                $extra = isset($row['data']) ? $this->dbconn->getExtra($row['data']) : [];
+                if (!is_array($extra) || (int) ($extra['finished_at'] ?? 0) < $completeCutoff) {
+                    continue;
+                }
+            }
+            $data[] = $row;
+        }
+
+        if (count($data) < 1) {
             return new JSONResponse([]);
         }
 
@@ -80,18 +98,19 @@ class YtdlController extends Controller
             $timestamp = isset($value['timestamp']) ? date("Y-m-d H:i:s", (int) $value['timestamp']) : '';
             $fileInfo = sprintf('<div class="ncd-file-info"><button id="icon-clipboard" class="icon-clipboard" data-text="%s"></button> %s | %s</div>', $link, $filesize, $timestamp);
 
+            $status = (int) ($value['status'] ?? Helper::STATUS['ACTIVE']);
             $tmp = [];
             $tmp['filename'] = [$filename, $fileInfo];
             $tmp['speed'] = explode("|", (string) ($value['speed'] ?? ''));
             $tmp['progress'] = (string) ($value['progress'] ?? '0%');
-            $tmp['status'] = $this->statusLabel((int) ($value['status'] ?? Helper::STATUS['ACTIVE']));
+            $tmp['status'] = $this->statusLabel($status);
+            $tmp['actions'] = [];
 
-            $status = (int) ($value['status'] ?? Helper::STATUS['ACTIVE']);
-            if (!in_array($status, [Helper::STATUS['ACTIVE'], Helper::STATUS['WAITING']], true)) {
-                $tmp['actions'][] = ['name' => 'delete', 'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Delete')];
-                $tmp['actions'][] = ['name' => 'refresh', 'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Redownload')];
-            } else {
-                $tmp['actions'] = [];
+            if (in_array($status, [Helper::STATUS['ACTIVE'], Helper::STATUS['WAITING']], true) && !empty($extra['pid'])) {
+                $tmp['actions'][] = [
+                    'name' => 'cancel',
+                    'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Delete'),
+                ];
             }
 
             $tmp['data_gid'] = (string) ($value['gid'] ?? '');
@@ -144,17 +163,74 @@ class YtdlController extends Controller
             return ['error' => 'MediaFetch could not create a private download workspace.'];
         }
 
+        $targetPath = Helper::getDownloadDir();
+        $directImported = [];
+        $directImportFailed = false;
+
         $yt->setDownloadDir($workspace);
-        $yt->dbDlPath = Helper::getDownloadDir();
-        $resp = $yt->forceIPV4()->download($url);
+        $yt->dbDlPath = $targetPath;
+        $yt->setCompletedFileHandler(function (string $source) use ($yt, $workspace, $targetPath, &$directImported, &$directImportFailed): void {
+            if (isset($directImported[$source])) {
+                return;
+            }
+
+            $yt->markCurrentImporting($source);
+
+            try {
+                $item = $this->mediaImporter->importFile(
+                    $this->uid,
+                    $workspace,
+                    $source,
+                    $targetPath,
+                    false
+                );
+                $directImported[$source] = $item;
+                $yt->markCurrentImported($source, (string) $item['name']);
+            } catch (\Throwable $e) {
+                $directImportFailed = true;
+                $this->logger->error(
+                    'Could not import completed yt-dlp item immediately: ' . $e->getMessage(),
+                    ['app' => 'mediafetch', 'workspace' => $workspace, 'source' => $source, 'user' => $this->uid]
+                );
+            }
+        });
+
+        try {
+            $resp = $yt->forceIPV4()->download($url);
+        } finally {
+            $yt->setCompletedFileHandler(null);
+        }
+
+        $alreadyImportedSources = array_keys($directImported);
 
         if (isset($resp['error'])) {
-            $this->mediaImporter->cleanupWorkspace($workspace);
+            try {
+                $this->mediaImporter->importWorkspace(
+                    $this->uid,
+                    $workspace,
+                    $targetPath,
+                    $alreadyImportedSources
+                );
+                $this->mediaImporter->cleanupWorkspace($workspace);
+            } catch (\Throwable $e) {
+                $this->logger->error(
+                    'yt-dlp failed and MediaFetch could not salvage all completed files: ' . $e->getMessage(),
+                    ['app' => 'mediafetch', 'workspace' => $workspace, 'user' => $this->uid]
+                );
+            }
+
             return $resp;
         }
 
         try {
-            $imported = $this->mediaImporter->importWorkspace($this->uid, $workspace, Helper::getDownloadDir());
+            $remaining = $this->mediaImporter->importWorkspace(
+                $this->uid,
+                $workspace,
+                $targetPath,
+                $alreadyImportedSources
+            );
+
+            $imported = array_merge(array_values($directImported), $remaining);
             $yt->markImported($imported);
             $this->mediaImporter->cleanupWorkspace($workspace);
         } catch (\Throwable $e) {
@@ -163,7 +239,14 @@ class YtdlController extends Controller
                 'yt-dlp download completed but Nextcloud import failed: ' . $e->getMessage(),
                 ['app' => 'mediafetch', 'workspace' => $workspace, 'user' => $this->uid]
             );
-            return ['error' => 'Download finished, but MediaFetch could not add the file to Nextcloud. The temporary download was kept for recovery.'];
+            return ['error' => 'Download finished, but MediaFetch could not add all files to Nextcloud. The temporary download was kept for recovery.'];
+        }
+
+        if ($directImportFailed) {
+            $this->logger->warning(
+                'One or more immediate yt-dlp imports failed but were recovered by the final workspace import.',
+                ['app' => 'mediafetch', 'user' => $this->uid]
+            );
         }
 
         if ($imported === []) {
@@ -177,7 +260,7 @@ class YtdlController extends Controller
                 : sprintf('Added %d files to Nextcloud', count($names)),
             'file' => $names[0] ?? '',
             'files' => $names,
-            'path' => Helper::getDownloadDir(),
+            'path' => $targetPath,
         ];
     }
 
@@ -204,32 +287,33 @@ class YtdlController extends Controller
         if (!$row || !isset($row['data'])) {
             return new JSONResponse(['error' => sprintf("%s was not found in database!", $gid)]);
         }
-        $data = $this->dbconn->getExtra($row["data"]);
+
+        $data = $this->dbconn->getExtra($row['data']);
         if (!is_array($data)) {
             $data = [];
         }
 
-        if (!isset($data['pid'])) {
-            $deleted = $this->dbconn->deleteByGid($gid);
-            return new JSONResponse(['message' => $deleted ? sprintf("%s is deleted from database!", $gid) : 'Nothing deleted']);
+        $status = (int) ($row['status'] ?? Helper::STATUS['ACTIVE']);
+        $isRunningStatus = in_array($status, [Helper::STATUS['ACTIVE'], Helper::STATUS['WAITING']], true);
+
+        if ($isRunningStatus) {
+            if (empty($data['pid'])) {
+                return new JSONResponse(['error' => 'The yt-dlp process is still starting. Please try cancelling again in a moment.']);
+            }
+
+            $pid = (int) $data['pid'];
+            if (Helper::isRunning($pid) && !Helper::stop($pid)) {
+                return new JSONResponse(['error' => sprintf('Failed to terminate yt-dlp process %d.', $pid)]);
+            }
+
+            $this->dbconn->updateStatus($gid, Helper::STATUS['ERROR']);
+            return new JSONResponse(['message' => $this->l10n->t('Download cancelled')]);
         }
 
-        $pid = $data['pid'];
-        if (!Helper::isRunning($pid)) {
-            if ($this->dbconn->deleteByGid($gid)) {
-                $msg = sprintf("%s is deleted from database!", $gid);
-            } else {
-                $msg = sprintf("process %d is not running!", $pid);
-            }
-        } else {
-            if (Helper::stop($pid)) {
-                $msg = sprintf("process %d has been terminated!", $pid);
-            } else {
-                $msg = sprintf("failed to terminate process %d!", $pid);
-            }
-            $this->dbconn->deleteByGid($gid);
-        }
-        return new JSONResponse(['message' => $msg]);
+        $deleted = $this->dbconn->deleteByGid($gid);
+        return new JSONResponse([
+            'message' => $deleted ? $this->l10n->t('Entry removed') : $this->l10n->t('Nothing deleted'),
+        ]);
     }
 
     /**
@@ -294,7 +378,7 @@ class YtdlController extends Controller
     {
         return match ($status) {
             Helper::STATUS['PAUSED'] => $this->l10n->t('Paused'),
-            Helper::STATUS['COMPLETE'] => $this->l10n->t('Complete'),
+            Helper::STATUS['COMPLETE'] => '✅',
             Helper::STATUS['WAITING'] => $this->l10n->t('Adding to Nextcloud…'),
             Helper::STATUS['ERROR'] => $this->l10n->t('Error'),
             default => $this->l10n->t('Downloading…'),

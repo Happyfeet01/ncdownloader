@@ -10,6 +10,7 @@ use OCP\AppFramework\Http\JSONResponse;
 use OCP\Files\IRootFolder;
 use OCP\IL10N;
 use OCP\IRequest;
+use OCP\IURLGenerator;
 use \OC\Files\Filesystem;
 
 class Aria2Controller extends Controller
@@ -26,22 +27,29 @@ class Aria2Controller extends Controller
     private $rootFolder;
     private $downloadDir;
     private $urlGenerator;
-    public function __construct($appName, IRequest $request, $UserId, IL10N $IL10N, IRootFolder $rootFolder, Aria2 $aria2)
-    {
+
+    public function __construct(
+        $appName,
+        IRequest $request,
+        $UserId,
+        IL10N $IL10N,
+        IRootFolder $rootFolder,
+        Aria2 $aria2,
+        IURLGenerator $urlGenerator
+    ) {
         parent::__construct($appName, $request);
         $this->uid = $UserId;
         $this->l10n = $IL10N;
         $this->rootFolder = $rootFolder;
-        $this->urlGenerator = \OC::$server->get(\OCP\IURLGenerator::class);
+        $this->urlGenerator = $urlGenerator;
         $this->downloadDir = Helper::getDownloadDir();
         \OC_Util::setupFS();
-        //$this->config = \OC::$server->getAppConfig();
         $this->aria2 = $aria2;
         $this->aria2->init();
         $this->dbconn = new DbHelper();
         $this->counters = new Counters($aria2, $this->dbconn, $UserId);
-       
     }
+
     /**
      * @NoAdminRequired
      */
@@ -110,8 +118,8 @@ class Aria2Controller extends Controller
             }
         }
         return $resp;
-
     }
+
     private function Start()
     {
         if ($this->aria2->isRunning()) {
@@ -126,17 +134,18 @@ class Aria2Controller extends Controller
     {
         return array(
             'name' => $name,
-            'path' => $this->urlGenerator->linkToRoute('ncdownloader.Aria2.Action', ['path' => $path]),
+            'path' => $this->urlGenerator->linkToRoute('mediafetch.Aria2.Action', ['path' => $path]),
         );
     }
+
     /**
      * @NoAdminRequired
      */
     public function getStatus($path)
     {
-        //$path = $this->request->getRequestUri();
         $counter = $this->counters->getCounters();
-        switch (strtolower($path)) {
+        $normalizedPath = strtolower($path);
+        switch ($normalizedPath) {
             case "active":
                 $resp = $this->aria2->tellActive();
                 break;
@@ -155,13 +164,24 @@ class Aria2Controller extends Controller
         if (isset($resp['error'])) {
             return new JSONResponse($resp);
         }
+
         $data = $this->transformResp($resp);
+        if (in_array($normalizedPath, ['complete', 'fail'], true)) {
+            $status = $normalizedPath === 'complete' ? Helper::STATUS['COMPLETE'] : Helper::STATUS['ERROR'];
+            $ytdlRows = $this->dbconn->getYtdlByUidAndStatus($this->uid, [$status]);
+            $historyRows = $this->transformYtdlHistoryRows($ytdlRows, $status);
+            if ($historyRows !== []) {
+                $data['row'] = array_merge($data['row'] ?? [], $historyRows);
+                $data['title'] = Helper::getTableTitles();
+            }
+        }
+
         $data['counter'] = $counter;
         return new JSONResponse($data);
     }
+
     private function transformResp($resp)
     {
-
         $data = [];
         if (empty($resp)) {
             return $data;
@@ -169,12 +189,16 @@ class Aria2Controller extends Controller
         $data['row'] = [];
         $resp = $this->filterData($resp);
         foreach ($resp as $value) {
-
             $gid = $value['following'] ?? $value['gid'];
+            $extra = [];
+            $timestamp = 0;
             if ($row = $this->dbconn->getByGid($gid)) {
                 $filename = $row['filename'];
                 $timestamp = $row['timestamp'];
                 $extra = $this->dbconn->getExtra(($row['data']));
+                if (!is_array($extra)) {
+                    $extra = [];
+                }
             } else if (isset($value['files'][0]['path'])) {
                 $parts = explode("/", ($path = $value['files'][0]['path']));
                 if (count($parts) > 1) {
@@ -188,11 +212,9 @@ class Aria2Controller extends Controller
             if (!isset($value['completedLength'])) {
                 continue;
             }
-            //internal nextcloud absolute path for nodeExists
-            //$file = $this->userFolder . $this->downloadDir . "/" . $filename;
-            // $dir = $this->rootFolder->nodeExists($file) ? $this->downloadDir . "/" . $filename : $this->downloadDir;
+
             $dlDir = $extra['path'] ?? $this->downloadDir;
-            $file = $dlDir. "/" . $filename;
+            $file = $dlDir . "/" . $filename;
             $params = ['dir' => $dlDir];
             $fileInfo = Filesystem::getFileInfo($file);
             if ($fileInfo) {
@@ -202,11 +224,9 @@ class Aria2Controller extends Controller
                 }
             }
             $folderLink = $this->urlGenerator->linkToRoute('files.view.index', $params);
-            //$peers = ($this->getPeers($info['gid']));
             $completed = Helper::formatBytes($value['completedLength']);
             $percentage = $value['completedLength'] ? 100 * ($value['completedLength'] / $value['totalLength']) : 0;
             $completed = Helper::formatBytes($value['completedLength']);
-
             $total = Helper::formatBytes($value['totalLength']);
 
             $remaining = (int) $value['totalLength'] - (int) $value['completedLength'];
@@ -217,14 +237,11 @@ class Aria2Controller extends Controller
             $upload = $value['uploadLength'] ?? 0;
             $upload = Helper::formatBytes($upload);
             $extraInfo = "Seeders: $numSeeders|Up:$upload";
-            // $numPeers = isset($peers['result']) ? count($peers['result']) : 0;
             $value['progress'] = array(sprintf("%s(%.2f%%)", $completed, $percentage), $extraInfo);
-            $timestamp = $timestamp ?? 0;
-            //$prefix = $value['files'][0]['path'];
             $tmp = [];
             $actions = [];
-            $filename = sprintf('<a class="download-file-folder" href="%s">%s</a>', $folderLink, $filename);
-            $fileInfo = sprintf('<button id="icon-clipboard" class="icon-clipboard" data-text="%s"></button> %s | %s', $extra["link"] ?? 'nolink', $total, date("Y-m-d H:i:s", $timestamp));
+            $filename = sprintf('<a class="download-file-folder" href="%s">%s</a>', $folderLink, htmlspecialchars((string) $filename, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'));
+            $fileInfo = sprintf('<button id="icon-clipboard" class="icon-clipboard" data-text="%s"></button> %s | %s', htmlspecialchars((string) ($extra["link"] ?? 'nolink'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'), $total, date("Y-m-d H:i:s", (int) $timestamp));
             $tmp['filename'] = array($filename, $fileInfo);
 
             if ($this->aria2->methodName === "tellStopped") {
@@ -239,6 +256,7 @@ class Aria2Controller extends Controller
                 $tmp['speed'] = $speed;
                 $tmp['progress'] = $value['progress'];
                 $actions[] = $this->createActionItem('pause', 'pause');
+                $actions[] = $this->createActionItem('cancel', 'remove');
             }
             if (strtolower($value['status']) === 'error') {
                 $tmp['status'] = $value['errorMessage'];
@@ -247,7 +265,6 @@ class Aria2Controller extends Controller
             }
             $tmp['data_gid'] = $value['gid'] ?? 0;
             $tmp['actions'] = $actions;
-            //$tmp['actions'] = '';
             array_push($data['row'], $tmp);
         }
         if ($this->aria2->methodName === "tellActive") {
@@ -257,9 +274,55 @@ class Aria2Controller extends Controller
         }
         return $data;
     }
+
+    private function transformYtdlHistoryRows(array $rows, int $status): array
+    {
+        $result = [];
+        foreach ($rows as $row) {
+            $extra = isset($row['data']) ? $this->dbconn->getExtra($row['data']) : [];
+            if (!is_array($extra)) {
+                $extra = [];
+            }
+
+            $folder = (string) ($extra['path'] ?? $this->downloadDir);
+            $folderLink = $this->urlGenerator->linkToRoute('files.view.index', ['dir' => $folder]);
+            $safeFilename = htmlspecialchars((string) ($row['filename'] ?? 'unknown'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $filename = sprintf('<a class="download-file-folder" href="%s">%s</a>', htmlspecialchars($folderLink, ENT_QUOTES, 'UTF-8'), $safeFilename);
+            $link = htmlspecialchars((string) ($extra['link'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            $timestamp = isset($row['timestamp']) ? date('Y-m-d H:i:s', (int) $row['timestamp']) : '';
+            $fileInfo = sprintf('<button id="icon-clipboard" class="icon-clipboard" data-text="%s"></button> yt-dlp | %s', $link, $timestamp);
+
+            $statusText = $status === Helper::STATUS['COMPLETE'] ? $this->l10n->t('Complete') : $this->l10n->t('Error');
+            if ($status === Helper::STATUS['ERROR'] && !empty($extra['error'])) {
+                $error = trim((string) $extra['error']);
+                $error = function_exists('mb_strimwidth') ? mb_strimwidth($error, 0, 180, '…') : substr($error, 0, 180);
+                $statusText .= ': ' . $error;
+            }
+
+            $actions = [[
+                'name' => 'delete',
+                'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Delete'),
+            ]];
+            if (!empty($extra['link'])) {
+                $actions[] = [
+                    'name' => 'refresh',
+                    'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Redownload'),
+                ];
+            }
+
+            $result[] = [
+                'filename' => [$filename, $fileInfo],
+                'status' => $statusText,
+                'actions' => $actions,
+                'data_gid' => (string) ($row['gid'] ?? ''),
+            ];
+        }
+
+        return $result;
+    }
+
     private function filterData($resp)
     {
-
         $data = [];
         if (empty($resp)) {
             return $data;

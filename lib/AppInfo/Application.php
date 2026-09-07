@@ -40,7 +40,10 @@ class Application extends App implements IBootstrap
         });
 
         $context->registerService(MediaImporter::class, function (ContainerInterface $container) {
-            return new MediaImporter($container->get(IRootFolder::class));
+            return new MediaImporter(
+                $container->get(IRootFolder::class),
+                $container->get(IConfig::class)
+            );
         });
 
         $context->registerService(Aria2DownloadScanner::class, function (ContainerInterface $container) {

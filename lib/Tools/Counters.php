@@ -18,44 +18,47 @@ class Counters
         $this->dbconn = $dbconn;
         $this->uid = $uid;
     }
+
     public function getCounters()
     {
         return [
             'active' => $this->getCounter(),
             'waiting' => $this->getCounter('tellWaiting'),
-            'complete' => $this->getCounter('tellStopped'),
-            'fail' => $this->getCounter('tellFail'),
-            'ytdl' => $this->getCounter('ytdl'),
+            'complete' => $this->getCounter('tellStopped') + $this->countYtdlByStatus([Helper::STATUS['COMPLETE']]),
+            'fail' => $this->getCounter('tellFail') + $this->countYtdlByStatus([Helper::STATUS['ERROR']]),
+            'ytdl' => $this->countYtdlByStatus([Helper::STATUS['ACTIVE'], Helper::STATUS['WAITING']]),
         ];
     }
+
     private function getCounter($action = 'tellActive')
     {
-        if ($action === 'ytdl') {
-            $data = $this->dbconn->getYtdlByUid($this->uid);
-        } else if ($action === 'tellActive') {
+        if ($action === 'tellActive') {
             $data = $this->aria2->{$action}([]);
         } else {
             $data = $this->aria2->{$action}($this->minmax);
         }
 
-        if (!is_array($data) && count($data) < 1) {
+        if (!is_array($data) || count($data) < 1) {
             return 0;
         }
-        if ($action !== 'ytdl') {
-            $data = $this->filterData($data);
-        }
+
+        $data = $this->filterData($data);
         return count($data);
+    }
+
+    private function countYtdlByStatus(array $statuses): int
+    {
+        return count($this->dbconn->getYtdlByUidAndStatus($this->uid, $statuses));
     }
 
     private function filterData($resp)
     {
-
         $data = [];
         if (empty($resp)) {
             return $data;
         }
         if (isset($resp['error'])) {
-            return $resp;
+            return [];
         }
 
         $data = array_filter($resp, function ($value) {

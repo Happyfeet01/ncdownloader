@@ -1,5 +1,15 @@
 <template>
   <section v-if="display.download" class="form-section" id="form-section">
+    <div class="mediafetch-reset-toolbar">
+      <button
+        type="button"
+        class="mediafetch-reset-button"
+        :disabled="resetting"
+        @click="resetAllDownloads"
+      >
+        {{ resetting ? resetWorkingLabel : resetLabel }}
+      </button>
+    </div>
     <mainForm
       @download="download"
       @search="search"
@@ -43,15 +53,47 @@ export default {
   data() {
     return {
       display: { download: true, search: false },
+      resetting: false,
+      resetLabel: t(APP_ID, "Stop all downloads & reset"),
+      resetWorkingLabel: t(APP_ID, "Stopping downloads…"),
+      resetConfirm: t(APP_ID, "Stop all active MediaFetch downloads, clear the live queue and remove failed download history? Completed download history will be kept."),
       uris: {
         ytd_url: helper.generateUrl("/apps/mediafetch/ytdl/new"),
         aria2_url: helper.generateUrl("/apps/mediafetch/new"),
         search_url: helper.generateUrl("/apps/mediafetch/search"),
         upload_url: helper.generateUrl("/apps/mediafetch/upload"),
+        reset_url: helper.generateUrl("/apps/mediafetch/downloads/reset"),
       },
     };
   },
   methods: {
+    resetAllDownloads() {
+      if (this.resetting || !window.confirm(this.resetConfirm)) {
+        return;
+      }
+
+      this.resetting = true;
+      helper.disablePolling();
+
+      helper.httpClient(this.uris.reset_url)
+        .setData({})
+        .setHandler((data) => {
+          this.resetting = false;
+          successCallback(data);
+
+          if (data && Array.isArray(data.warnings) && data.warnings.length > 0) {
+            helper.warn(data.warnings.join(" "), 10000);
+          }
+
+          contentTable.getInstance().noData();
+          helper.getCounters();
+        })
+        .setErrorHandler(() => {
+          this.resetting = false;
+          helper.error(t(APP_ID, "Could not reset the download queue."));
+        })
+        .send();
+    },
     download(event) {
       const element = event.target;
       const formWrapper = element.closest("form");
@@ -177,6 +219,24 @@ export default {
     flex-flow: column;
     gap: 1.2em;
   }
+
+  .mediafetch-reset-toolbar {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .mediafetch-reset-button {
+    border: 1px solid var(--color-error);
+    color: var(--color-error-text, var(--color-main-text));
+    background: var(--color-main-background);
+    font-weight: 600;
+  }
+
+  .mediafetch-reset-button:hover:not(:disabled),
+  .mediafetch-reset-button:focus-visible:not(:disabled) {
+    background: var(--color-error);
+    color: var(--color-primary-element-text);
+  }
 }
 
 @media only screen and (max-width: 1024px) {
@@ -184,6 +244,14 @@ export default {
     #ncdownloader-form-wrapper {
       position: relative;
       margin: 2px;
+    }
+
+    .mediafetch-reset-toolbar {
+      justify-content: stretch;
+    }
+
+    .mediafetch-reset-button {
+      width: 100%;
     }
   }
 }

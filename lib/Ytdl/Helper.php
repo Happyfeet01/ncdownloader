@@ -18,6 +18,7 @@ class Helper
     protected $placeholderGid;
     protected $jobToken;
     protected $gids = [];
+    protected $fileGids = [];
 
     public function __construct()
     {
@@ -74,6 +75,19 @@ class Helper
         return null;
     }
 
+    public function getErrorInfo(string $buffer): ?array
+    {
+        $regex = '/ERROR:\s+\[(?<site>[^\]]+)]\s+(?<id>[^:]+):\s*(?<message>.*)/i';
+        if (preg_match($regex, $buffer, $matches)) {
+            return [
+                'id' => trim((string) $matches['id']),
+                'site' => trim((string) $matches['site']),
+                'message' => trim((string) $matches['message']),
+            ];
+        }
+        return null;
+    }
+
     public function getProgress(string $buffer): ?array
     {
         $progressRegex = '#\[download\]\s+' .
@@ -113,15 +127,55 @@ class Helper
         }
     }
 
-    public function updateAllStatus(int $status): void
+    public function markImportingFile(string $source): void
+    {
+        $gid = $this->findGidForFile($source);
+        if ($gid) {
+            $this->dbconn->updateStatus($gid, ToolsHelper::STATUS['WAITING']);
+        }
+    }
+
+    public function markImportedFile(string $source, string $filename): void
+    {
+        $gid = $this->findGidForFile($source);
+        if (!$gid) {
+            return;
+        }
+
+        $this->dbconn->setFilename($gid, basename($filename));
+        $this->dbconn->updateStatus($gid, ToolsHelper::STATUS['COMPLETE']);
+        $this->setFinishedAt($gid);
+        $this->fileGids[basename($filename)] = $gid;
+    }
+
+    public function setCurrentFilename(string $filename): void
+    {
+        if ($this->gid) {
+            $this->dbconn->setFilename($this->gid, basename($filename));
+            $this->rememberFileForCurrentGid($filename);
+        }
+    }
+
+    public function updateAllStatus(int $status, bool $preserveTerminal = false): void
     {
         $this->status = $status;
         $gids = $this->gids;
         if ($gids === [] && $this->placeholderGid) {
             $gids[] = $this->placeholderGid;
         }
+
         foreach (array_unique($gids) as $gid) {
+            if ($preserveTerminal) {
+                $row = $this->dbconn->getByGid($gid);
+                $current = (int) ($row['status'] ?? -1);
+                if (in_array($current, [ToolsHelper::STATUS['COMPLETE'], ToolsHelper::STATUS['ERROR']], true)) {
+                    continue;
+                }
+            }
             $this->dbconn->updateStatus($gid, $status);
+            if ($status === ToolsHelper::STATUS['COMPLETE']) {
+                $this->setFinishedAt($gid);
+            }
         }
     }
 
@@ -146,6 +200,7 @@ class Helper
             $current = basename((string) $row['filename']);
             if (isset($names[$current]) && $names[$current] !== $current) {
                 $this->dbconn->setFilename($gid, $names[$current]);
+                $this->fileGids[basename($names[$current])] = $gid;
             }
         }
     }
@@ -157,12 +212,22 @@ class Helper
 
     public function run(string $buffer, array $extra)
     {
+        if ($errorInfo = $this->getErrorInfo($buffer)) {
+            $this->gid = ToolsHelper::generateGID($errorInfo['id'] . '|' . ($this->jobToken ?? 'mediafetch'));
+            $extra['error'] = $errorInfo['message'];
+            $this->ensureCurrentItem($extra, $errorInfo['id']);
+            $this->dbconn->updateStatus($this->gid, ToolsHelper::STATUS['ERROR']);
+            return;
+        }
+
         $info = $this->getSiteInfo($buffer);
         if (isset($info["id"])) {
             $this->gid = ToolsHelper::generateGID($info["id"] . '|' . ($this->jobToken ?? 'mediafetch'));
+            $this->ensureCurrentItem($extra, $info['id']);
         }
         if (!$this->gid || $this->gid === $this->placeholderGid) {
             $this->gid = ToolsHelper::generateGID($extra["link"] . '|' . ($this->jobToken ?? microtime(true)));
+            $this->ensureCurrentItem($extra, 'Preparing download…');
         }
 
         $downloadInfo = $this->getDownloadInfo($buffer);
@@ -193,11 +258,48 @@ class Helper
             'data' => $this->serializeExtra($extra),
         ];
 
-        $inserted = $this->dbconn->insert($data);
-        if ($inserted && !in_array($this->gid, $this->gids, true)) {
+        $this->dbconn->insert($data);
+        $this->dbconn->setFilename($this->gid, basename($file));
+        $this->dbconn->setData($this->gid, $this->serializeExtra($extra));
+        $this->dbconn->updateStatus($this->gid, ToolsHelper::STATUS['ACTIVE']);
+        $this->rememberFileForCurrentGid($file);
+
+        if (!in_array($this->gid, $this->gids, true)) {
             $this->gids[] = $this->gid;
         }
 
+        $this->removePlaceholder();
+    }
+
+    private function ensureCurrentItem(array $extra, string $label): void
+    {
+        if (!$this->gid) {
+            return;
+        }
+
+        $data = [
+            'uid' => $this->user,
+            'gid' => $this->gid,
+            'type' => ToolsHelper::DOWNLOADTYPE['YOUTUBE-DL'],
+            'filename' => $label !== '' ? $label : 'Preparing download…',
+            'status' => ToolsHelper::STATUS['ACTIVE'],
+            'timestamp' => time(),
+            'speed' => 'Starting',
+            'progress' => '0%',
+            'data' => $this->serializeExtra($extra),
+        ];
+
+        $this->dbconn->insert($data);
+        $this->dbconn->setData($this->gid, $this->serializeExtra($extra));
+        if (!in_array($this->gid, $this->gids, true)) {
+            $this->gids[] = $this->gid;
+        }
+
+        $this->removePlaceholder();
+    }
+
+    private function removePlaceholder(): void
+    {
         if ($this->placeholderGid && $this->placeholderGid !== $this->gid) {
             $this->dbconn->deleteByGid($this->placeholderGid);
             $this->placeholderGid = null;
@@ -207,6 +309,47 @@ class Helper
     private function updateFilename(string $file)
     {
         $this->dbconn->setFilename($this->gid, basename($file));
+        $this->rememberFileForCurrentGid($file);
+    }
+
+    private function rememberFileForCurrentGid(string $file): void
+    {
+        if ($this->gid) {
+            $this->fileGids[basename($file)] = $this->gid;
+        }
+    }
+
+    private function findGidForFile(string $file): ?string
+    {
+        $basename = basename($file);
+        if (isset($this->fileGids[$basename])) {
+            return $this->fileGids[$basename];
+        }
+
+        foreach ($this->gids as $gid) {
+            $row = $this->dbconn->getByGid($gid);
+            if ($row && basename((string) ($row['filename'] ?? '')) === $basename) {
+                $this->fileGids[$basename] = $gid;
+                return $gid;
+            }
+        }
+
+        return $this->gid ?: null;
+    }
+
+    private function setFinishedAt(string $gid): void
+    {
+        $row = $this->dbconn->getByGid($gid);
+        if (!$row || !isset($row['data'])) {
+            return;
+        }
+
+        $extra = $this->dbconn->getExtra($row['data']);
+        if (!is_array($extra)) {
+            $extra = [];
+        }
+        $extra['finished_at'] = time();
+        $this->dbconn->setData($gid, $this->serializeExtra($extra));
     }
 
     private function serializeExtra(array $extra)

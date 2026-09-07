@@ -12,6 +12,7 @@ return [
         ['name' => 'Ytdl#Download', 'url' => '/ytdl/new', 'verb' => 'POST'],
         ['name' => 'Ytdl#Delete', 'url' => '/ytdl/delete', 'verb' => 'POST'],
         ['name' => 'Ytdl#Redownload', 'url' => '/ytdl/redownload', 'verb' => 'POST'],
+        ['name' => 'Reset#reset', 'url' => '/downloads/reset', 'verb' => 'POST'],
         ['name' => 'Search#Execute', 'url' => '/search', 'verb' => 'POST'],
         // AdminSettings
         ['name' => 'Settings#saveAdmin', 'url' => '/admin/save', 'verb' => 'POST'],
