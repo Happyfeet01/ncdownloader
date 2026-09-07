@@ -13,6 +13,7 @@ All notable changes to MediaFetch will be documented in this file.
 - yt-dlp staging now defaults to `/var/tmp/mediafetch` instead of `/tmp/mediafetch` so large downloads do not consume a tmpfs-backed `/tmp`; administrators can override the work directory with the `mediafetch` app setting `work_directory`.
 - The yt-dlp Downloads view now shows only running/importing jobs, so completed and failed rows no longer remain in the live queue indefinitely.
 - Completed yt-dlp items now briefly show a `✅` state after `Adding to Nextcloud…` before leaving the live queue, and `after_move` completion is matched to the correct playlist item instead of relying on whichever item is currently active.
+- Existing yt-dlp destination files are now skipped during the Nextcloud import instead of being renamed into duplicate copies such as `(1)`, `(2)` and so on.
 - Completed and failed yt-dlp items now appear together with aria2/HTTP/magnet history in the existing Complete Downloads and Failed Downloads views.
 - Playlist entries that fail before a media file is created are now recorded as failed yt-dlp items, including the extractor error when available.
 - Running yt-dlp jobs now expose a cancel action once their process ID is known; cancelled jobs are retained as failed history instead of being silently deleted.
@@ -77,4 +78,4 @@ All notable changes to MediaFetch will be documented in this file.
 ### Tested
 
 - Runtime tested successfully on Nextcloud 34.0.2 with PHP 8.4.
-- Main app view, mobile navigation, admin settings, personal settings, aria2 and yt-dlp workflows verified on the target installation.
+- Main app view, mobile navigation, admin/personal settings, aria2 and yt-dlp workflows verified on the target installation.
