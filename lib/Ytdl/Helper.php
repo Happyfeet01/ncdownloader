@@ -18,6 +18,7 @@ class Helper
     protected $placeholderGid;
     protected $jobToken;
     protected $gids = [];
+    protected $fileGids = [];
 
     public function __construct()
     {
@@ -126,10 +127,32 @@ class Helper
         }
     }
 
+    public function markImportingFile(string $source): void
+    {
+        $gid = $this->findGidForFile($source);
+        if ($gid) {
+            $this->dbconn->updateStatus($gid, ToolsHelper::STATUS['WAITING']);
+        }
+    }
+
+    public function markImportedFile(string $source, string $filename): void
+    {
+        $gid = $this->findGidForFile($source);
+        if (!$gid) {
+            return;
+        }
+
+        $this->dbconn->setFilename($gid, basename($filename));
+        $this->dbconn->updateStatus($gid, ToolsHelper::STATUS['COMPLETE']);
+        $this->setFinishedAt($gid);
+        $this->fileGids[basename($filename)] = $gid;
+    }
+
     public function setCurrentFilename(string $filename): void
     {
         if ($this->gid) {
             $this->dbconn->setFilename($this->gid, basename($filename));
+            $this->rememberFileForCurrentGid($filename);
         }
     }
 
@@ -150,6 +173,9 @@ class Helper
                 }
             }
             $this->dbconn->updateStatus($gid, $status);
+            if ($status === ToolsHelper::STATUS['COMPLETE']) {
+                $this->setFinishedAt($gid);
+            }
         }
     }
 
@@ -174,6 +200,7 @@ class Helper
             $current = basename((string) $row['filename']);
             if (isset($names[$current]) && $names[$current] !== $current) {
                 $this->dbconn->setFilename($gid, $names[$current]);
+                $this->fileGids[basename($names[$current])] = $gid;
             }
         }
     }
@@ -235,6 +262,7 @@ class Helper
         $this->dbconn->setFilename($this->gid, basename($file));
         $this->dbconn->setData($this->gid, $this->serializeExtra($extra));
         $this->dbconn->updateStatus($this->gid, ToolsHelper::STATUS['ACTIVE']);
+        $this->rememberFileForCurrentGid($file);
 
         if (!in_array($this->gid, $this->gids, true)) {
             $this->gids[] = $this->gid;
@@ -281,6 +309,47 @@ class Helper
     private function updateFilename(string $file)
     {
         $this->dbconn->setFilename($this->gid, basename($file));
+        $this->rememberFileForCurrentGid($file);
+    }
+
+    private function rememberFileForCurrentGid(string $file): void
+    {
+        if ($this->gid) {
+            $this->fileGids[basename($file)] = $this->gid;
+        }
+    }
+
+    private function findGidForFile(string $file): ?string
+    {
+        $basename = basename($file);
+        if (isset($this->fileGids[$basename])) {
+            return $this->fileGids[$basename];
+        }
+
+        foreach ($this->gids as $gid) {
+            $row = $this->dbconn->getByGid($gid);
+            if ($row && basename((string) ($row['filename'] ?? '')) === $basename) {
+                $this->fileGids[$basename] = $gid;
+                return $gid;
+            }
+        }
+
+        return $this->gid ?: null;
+    }
+
+    private function setFinishedAt(string $gid): void
+    {
+        $row = $this->dbconn->getByGid($gid);
+        if (!$row || !isset($row['data'])) {
+            return;
+        }
+
+        $extra = $this->dbconn->getExtra($row['data']);
+        if (!is_array($extra)) {
+            $extra = [];
+        }
+        $extra['finished_at'] = time();
+        $this->dbconn->setData($gid, $this->serializeExtra($extra));
     }
 
     private function serializeExtra(array $extra)
