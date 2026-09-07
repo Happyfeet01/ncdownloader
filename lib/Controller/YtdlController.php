@@ -59,8 +59,11 @@ class YtdlController extends Controller
      */
     public function Index()
     {
-        $data = $this->dbconn->getYtdlByUid($this->uid);
-        if (!is_array($data) || count($data) < 1) {
+        $data = $this->dbconn->getYtdlByUidAndStatus($this->uid, [
+            Helper::STATUS['ACTIVE'],
+            Helper::STATUS['WAITING'],
+        ]);
+        if (count($data) < 1) {
             return new JSONResponse([]);
         }
 
@@ -85,13 +88,13 @@ class YtdlController extends Controller
             $tmp['speed'] = explode("|", (string) ($value['speed'] ?? ''));
             $tmp['progress'] = (string) ($value['progress'] ?? '0%');
             $tmp['status'] = $this->statusLabel((int) ($value['status'] ?? Helper::STATUS['ACTIVE']));
+            $tmp['actions'] = [];
 
-            $status = (int) ($value['status'] ?? Helper::STATUS['ACTIVE']);
-            if (!in_array($status, [Helper::STATUS['ACTIVE'], Helper::STATUS['WAITING']], true)) {
-                $tmp['actions'][] = ['name' => 'delete', 'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Delete')];
-                $tmp['actions'][] = ['name' => 'refresh', 'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Redownload')];
-            } else {
-                $tmp['actions'] = [];
+            if (!empty($extra['pid'])) {
+                $tmp['actions'][] = [
+                    'name' => 'cancel',
+                    'path' => $this->urlGenerator->linkToRoute('mediafetch.Ytdl.Delete'),
+                ];
             }
 
             $tmp['data_gid'] = (string) ($value['gid'] ?? '');
@@ -268,32 +271,33 @@ class YtdlController extends Controller
         if (!$row || !isset($row['data'])) {
             return new JSONResponse(['error' => sprintf("%s was not found in database!", $gid)]);
         }
-        $data = $this->dbconn->getExtra($row["data"]);
+
+        $data = $this->dbconn->getExtra($row['data']);
         if (!is_array($data)) {
             $data = [];
         }
 
-        if (!isset($data['pid'])) {
-            $deleted = $this->dbconn->deleteByGid($gid);
-            return new JSONResponse(['message' => $deleted ? sprintf("%s is deleted from database!", $gid) : 'Nothing deleted']);
+        $status = (int) ($row['status'] ?? Helper::STATUS['ACTIVE']);
+        $isRunningStatus = in_array($status, [Helper::STATUS['ACTIVE'], Helper::STATUS['WAITING']], true);
+
+        if ($isRunningStatus) {
+            if (empty($data['pid'])) {
+                return new JSONResponse(['error' => 'The yt-dlp process is still starting. Please try cancelling again in a moment.']);
+            }
+
+            $pid = (int) $data['pid'];
+            if (Helper::isRunning($pid) && !Helper::stop($pid)) {
+                return new JSONResponse(['error' => sprintf('Failed to terminate yt-dlp process %d.', $pid)]);
+            }
+
+            $this->dbconn->updateStatus($gid, Helper::STATUS['ERROR']);
+            return new JSONResponse(['message' => $this->l10n->t('Download cancelled')]);
         }
 
-        $pid = $data['pid'];
-        if (!Helper::isRunning($pid)) {
-            if ($this->dbconn->deleteByGid($gid)) {
-                $msg = sprintf("%s is deleted from database!", $gid);
-            } else {
-                $msg = sprintf("process %d is not running!", $pid);
-            }
-        } else {
-            if (Helper::stop($pid)) {
-                $msg = sprintf("process %d has been terminated!", $pid);
-            } else {
-                $msg = sprintf("failed to terminate process %d!", $pid);
-            }
-            $this->dbconn->deleteByGid($gid);
-        }
-        return new JSONResponse(['message' => $msg]);
+        $deleted = $this->dbconn->deleteByGid($gid);
+        return new JSONResponse([
+            'message' => $deleted ? $this->l10n->t('Entry removed') : $this->l10n->t('Nothing deleted'),
+        ]);
     }
 
     /**
