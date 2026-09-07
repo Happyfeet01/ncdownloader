@@ -167,11 +167,11 @@ class Ytdl
             $process->run(function ($type, $buffer) use ($data, $process) {
                 $this->drainCompletedFiles();
 
+                $extra = $data;
+                $extra['pid'] = $process->getPid();
                 if (Process::ERR === $type) {
-                    $this->onError($buffer);
+                    $this->onError($buffer, $extra);
                 } else {
-                    $extra = $data;
-                    $extra['pid'] = $process->getPid();
                     $this->onOutput($buffer, $extra);
                 }
 
@@ -215,7 +215,7 @@ class Ytdl
             return;
         }
         $this->helper->applyImportedNames($imported);
-        $this->helper->updateAllStatus(Helper::STATUS['COMPLETE']);
+        $this->helper->updateAllStatus(Helper::STATUS['COMPLETE'], true);
     }
 
     public function markImportFailed(): void
@@ -282,9 +282,10 @@ class Ytdl
         $this->afterMoveOffset = 0;
     }
 
-    private function onError($buffer)
+    private function onError($buffer, array $extra)
     {
         $this->helper->log($buffer);
+        $this->helper->run($buffer, $extra);
     }
 
     public function onOutput($buffer, $extra)
