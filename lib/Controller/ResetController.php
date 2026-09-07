@@ -202,37 +202,93 @@ final class ResetController extends Controller
         ]);
     }
 
+    /**
+     * The Symfony Process PID can be the privileged sudo/unshare/nsenter
+     * wrapper, while yt-dlp and ffmpeg themselves are deliberately dropped back
+     * to the PHP-FPM uid by nc-vpn-exec. We therefore stop the descendants that
+     * are owned by the current PHP user first. The privileged wrapper is then
+     * expected to unwind naturally when its child exits.
+     */
     private function stopProcessTree(int $pid): bool
     {
-        $descendants = $this->collectDescendants($pid);
-        $targets = array_values(array_unique(array_merge($descendants, [$pid])));
+        if (!$this->processExists($pid)) {
+            return true;
+        }
 
-        foreach (array_reverse($targets) as $target) {
+        $targets = $this->getOwnedProcessTargets($pid);
+        if ($targets === []) {
+            // The VPN wrapper may still be between sudo/nsenter and setpriv.
+            // Keep the queue row instead of claiming success; a retry a moment
+            // later will see the www-data yt-dlp child once it has started.
+            return false;
+        }
+
+        $this->signalTargets($targets, 15);
+        if ($this->waitForOwnedTargetsToExit($pid, 20, 100000)) {
+            return true;
+        }
+
+        $targets = $this->getOwnedProcessTargets($pid);
+        $this->signalTargets($targets, 9);
+
+        return $this->waitForOwnedTargetsToExit($pid, 20, 100000);
+    }
+
+    /** @param int[] $targets */
+    private function signalTargets(array $targets, int $signal): void
+    {
+        // collectDescendants() is parent-first. Reverse it so ffmpeg/yt-dlp
+        // children are stopped before their parent process.
+        foreach (array_reverse(array_values(array_unique($targets))) as $target) {
             if ($this->processExists($target)) {
-                Helper::doSignal($target, 15);
+                Helper::doSignal($target, $signal);
             }
         }
+    }
 
-        usleep(250000);
-
-        $ok = true;
-        foreach (array_reverse($targets) as $target) {
-            if (!$this->processExists($target)) {
-                continue;
+    private function waitForOwnedTargetsToExit(int $pid, int $attempts, int $sleepMicros): bool
+    {
+        for ($attempt = 0; $attempt < $attempts; $attempt++) {
+            if ($this->getOwnedProcessTargets($pid) === []) {
+                return true;
             }
-            if (!Helper::doSignal($target, 9)) {
-                $ok = false;
-            }
+            usleep($sleepMicros);
         }
 
-        usleep(100000);
-        foreach ($targets as $target) {
-            if ($this->processExists($target)) {
-                return false;
-            }
+        return $this->getOwnedProcessTargets($pid) === [];
+    }
+
+    /** @return int[] */
+    private function getOwnedProcessTargets(int $pid): array
+    {
+        $targets = $this->processExists($pid) ? $this->collectDescendants($pid) : [];
+        if ($this->processExists($pid)) {
+            $targets[] = $pid;
         }
 
-        return $ok;
+        $selfUid = $this->getProcessUid(getmypid());
+        if ($selfUid === null) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            array_unique($targets),
+            fn(int $target): bool => $this->getProcessUid($target) === $selfUid
+        ));
+    }
+
+    private function getProcessUid(int $pid): ?int
+    {
+        if ($pid <= 1) {
+            return null;
+        }
+
+        $status = @file_get_contents('/proc/' . $pid . '/status');
+        if ($status === false || !preg_match('/^Uid:\s+(\d+)/m', $status, $matches)) {
+            return null;
+        }
+
+        return (int) $matches[1];
     }
 
     /** @return int[] */
