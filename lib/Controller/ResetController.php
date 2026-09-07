@@ -35,8 +35,12 @@ final class ResetController extends Controller
     }
 
     /**
-     * Stop all active downloads belonging to the current user and clear only
-     * the live queue. Completed and failed history is intentionally preserved.
+     * Stop all active downloads belonging to the current user, clear the live
+     * queue and clear failed history. Completed history is preserved.
+     *
+     * A live yt-dlp row is only removed after its tracked process has actually
+     * stopped. This avoids showing an empty queue while a privileged wrapper
+     * or ffmpeg child is still running in the background.
      *
      * @NoAdminRequired
      */
@@ -44,16 +48,18 @@ final class ResetController extends Controller
     {
         $stoppedYtdl = 0;
         $removedAria2 = 0;
+        $clearedFailedYtdl = 0;
+        $clearedFailedAria2 = 0;
         $warnings = [];
 
-        $ytdlRows = $this->dbconn->getYtdlByUidAndStatus($this->uid, [
+        $liveYtdlRows = $this->dbconn->getYtdlByUidAndStatus($this->uid, [
             Helper::STATUS['ACTIVE'],
             Helper::STATUS['WAITING'],
             Helper::STATUS['PAUSED'],
         ]);
 
         $pids = [];
-        foreach ($ytdlRows as $row) {
+        foreach ($liveYtdlRows as $row) {
             $extra = isset($row['data']) ? $this->dbconn->getExtra($row['data']) : [];
             if (!is_array($extra) || empty($extra['pid'])) {
                 continue;
@@ -65,27 +71,47 @@ final class ResetController extends Controller
             }
         }
 
+        $stoppedPids = [];
+        $failedPids = [];
         foreach (array_keys($pids) as $pid) {
             if (!$this->processExists($pid)) {
+                $stoppedPids[$pid] = true;
                 continue;
             }
 
             if (!$this->looksLikeYtdlProcess($pid)) {
+                $failedPids[$pid] = true;
                 $warnings[] = sprintf('Refused to stop stale PID %d because it no longer looks like yt-dlp.', $pid);
                 continue;
             }
 
             if ($this->stopProcessTree($pid)) {
                 $stoppedYtdl++;
+                $stoppedPids[$pid] = true;
             } else {
-                $warnings[] = sprintf('Could not terminate yt-dlp process tree %d completely.', $pid);
+                $failedPids[$pid] = true;
+                $warnings[] = sprintf('Could not terminate yt-dlp process tree %d completely. The queue entry was kept.', $pid);
             }
         }
 
-        foreach ($ytdlRows as $row) {
-            if (!empty($row['gid'])) {
-                $this->dbconn->deleteByGid((string) $row['gid']);
+        foreach ($liveYtdlRows as $row) {
+            if (empty($row['gid'])) {
+                continue;
             }
+
+            $extra = isset($row['data']) ? $this->dbconn->getExtra($row['data']) : [];
+            $pid = is_array($extra) && !empty($extra['pid']) ? (int) $extra['pid'] : 0;
+
+            if ($pid > 1 && isset($failedPids[$pid])) {
+                continue;
+            }
+
+            if ($pid > 1 && !isset($stoppedPids[$pid]) && $this->processExists($pid)) {
+                $warnings[] = sprintf('yt-dlp PID %d is still running. The queue entry was kept.', $pid);
+                continue;
+            }
+
+            $this->dbconn->deleteByGid((string) $row['gid']);
         }
 
         $aria2Jobs = [];
@@ -119,6 +145,40 @@ final class ResetController extends Controller
             }
         }
 
+        // Clear failed yt-dlp history for the current user. Completed rows stay.
+        $failedYtdlRows = $this->dbconn->getYtdlByUidAndStatus($this->uid, [Helper::STATUS['ERROR']]);
+        foreach ($failedYtdlRows as $row) {
+            if (!empty($row['gid'])) {
+                $clearedFailedYtdl += $this->dbconn->deleteByGid((string) $row['gid']) > 0 ? 1 : 0;
+            }
+        }
+
+        // aria2 keeps failed results in its stopped-result store. Remove only
+        // entries owned by the current user and keep successful history intact.
+        $failedAria2Jobs = $this->aria2->tellFail([0, 999]);
+        if (is_array($failedAria2Jobs)) {
+            foreach ($failedAria2Jobs as $job) {
+                if (!is_array($job) || empty($job['gid'])) {
+                    continue;
+                }
+
+                $rpcGid = (string) $job['gid'];
+                $dbGid = (string) ($job['following'] ?? $rpcGid);
+                if ($this->dbconn->getUidByGid($dbGid) !== $this->uid) {
+                    continue;
+                }
+
+                $resp = $this->aria2->removeDownloadResult($rpcGid);
+                $ok = isset($resp['result']) && is_string($resp['result']) && strtolower($resp['result']) === 'ok';
+                if ($ok) {
+                    $clearedFailedAria2++;
+                    $this->dbconn->deleteByGid($dbGid);
+                } else {
+                    $warnings[] = sprintf('Could not clear failed aria2 result %s.', $rpcGid);
+                }
+            }
+        }
+
         if ($warnings !== []) {
             $this->logger->warning('MediaFetch reset completed with warnings.', [
                 'app' => 'mediafetch',
@@ -129,13 +189,16 @@ final class ResetController extends Controller
 
         return new JSONResponse([
             'message' => sprintf(
-                'Download queue reset: %d yt-dlp process(es) stopped, %d aria2 download(s) removed.',
+                'Reset complete: %d yt-dlp process(es) stopped, %d aria2 download(s) removed, %d failed item(s) cleared.',
                 $stoppedYtdl,
-                $removedAria2
+                $removedAria2,
+                $clearedFailedYtdl + $clearedFailedAria2
             ),
             'warnings' => $warnings,
             'stopped_ytdl' => $stoppedYtdl,
             'removed_aria2' => $removedAria2,
+            'cleared_failed_ytdl' => $clearedFailedYtdl,
+            'cleared_failed_aria2' => $clearedFailedAria2,
         ]);
     }
 
@@ -163,7 +226,13 @@ final class ResetController extends Controller
         }
 
         usleep(100000);
-        return $ok && !$this->processExists($pid);
+        foreach ($targets as $target) {
+            if ($this->processExists($target)) {
+                return false;
+            }
+        }
+
+        return $ok;
     }
 
     /** @return int[] */
