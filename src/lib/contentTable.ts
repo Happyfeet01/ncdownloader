@@ -10,7 +10,6 @@ class contentTable {
     rowClass: string = "table-row";
     headingClass: string = "table-heading";
     cellClass: string = "table-cell";
-    //this is the parent element the table is going to append to
     tableContainer: string = 'ncdownloader-table-wrapper';
     numRow: number;
     table: HTMLElement;
@@ -136,11 +135,14 @@ class contentTable {
 
     createActionButton(name: string, path: string, data: string): HTMLElement {
         let button = document.createElement("button");
-        button.classList.add("icon-" + name);
+        const iconName = name === 'cancel' ? 'close' : name;
+        button.classList.add("icon-" + iconName);
         button.setAttribute("path", path);
         button.setAttribute("data", data || "nodata");
         if (name == 'refresh') {
             name = helper.t('Redownload');
+        } else if (name == 'cancel') {
+            name = helper.t('Cancel');
         }
         button.setAttribute("data-tippy-content", helper.ucfirst(name));
         button.setAttribute("title", helper.ucfirst(name));
@@ -155,7 +157,6 @@ class contentTable {
         button.setAttribute("id", "action-links-button");
         div.classList.add("action-item");
         div.appendChild(button);
-        //div.appendChild(actionLinks);
         cell.appendChild(div);
     }
 }
