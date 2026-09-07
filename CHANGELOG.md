@@ -11,6 +11,12 @@ All notable changes to MediaFetch will be documented in this file.
 - Already imported playlist items keep their completed state while later entries continue downloading or fail.
 - A final workspace pass still imports sidecar files and recovers completed files if an immediate per-item import was not possible.
 - yt-dlp staging now defaults to `/var/tmp/mediafetch` instead of `/tmp/mediafetch` so large downloads do not consume a tmpfs-backed `/tmp`; administrators can override the work directory with the `mediafetch` app setting `work_directory`.
+- The yt-dlp Downloads view now shows only running/importing jobs, so completed and failed rows no longer remain in the live queue indefinitely.
+- Completed and failed yt-dlp items now appear together with aria2/HTTP/magnet history in the existing Complete Downloads and Failed Downloads views.
+- Playlist entries that fail before a media file is created are now recorded as failed yt-dlp items, including the extractor error when available.
+- Running yt-dlp jobs now expose a cancel action once their process ID is known; cancelled jobs are retained as failed history instead of being silently deleted.
+- Active aria2/HTTP/magnet downloads now expose a cancel action in addition to pause.
+- Corrected the remaining aria2 action route to use the `mediafetch` route namespace.
 
 ## [1.0.1] - 2026-09-03
 
