@@ -192,21 +192,18 @@ class Ytdl
         return ['error' => $process->getErrorOutput() ?: 'yt-dlp failed'];
     }
 
-    public function markCurrentImporting(): void
+    public function markCurrentImporting(string $source): void
     {
         if ($this->helper) {
-            $this->helper->updateStatus(Helper::STATUS['WAITING']);
+            $this->helper->markImportingFile($source);
         }
     }
 
-    public function markCurrentImported(string $filename): void
+    public function markCurrentImported(string $source, string $filename): void
     {
-        if (!$this->helper) {
-            return;
+        if ($this->helper) {
+            $this->helper->markImportedFile($source, $filename);
         }
-
-        $this->helper->setCurrentFilename($filename);
-        $this->helper->updateStatus(Helper::STATUS['COMPLETE']);
     }
 
     public function markImported(array $imported): void
