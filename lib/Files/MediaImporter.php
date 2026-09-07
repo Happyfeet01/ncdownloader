@@ -56,7 +56,10 @@ final class MediaImporter
      * still be running. By default the temporary source is kept so yt-dlp can
      * finish any remaining after_video/playlist stages safely.
      *
-     * @return array{source:string,name:string,path:string}
+     * Existing files with the same destination name are treated as already
+     * present instead of being renamed to another copy.
+     *
+     * @return array{source:string,name:string,path:string,skipped:bool}
      */
     public function importFile(
         string $uid,
@@ -98,14 +101,38 @@ final class MediaImporter
             : $this->ensureFolder($targetFolder, $relativeDir);
 
         $sourceName = basename($relative);
-        $destinationName = $destinationFolder->getNonExistingName($sourceName);
+        $relativeTarget = trim($targetPath, '/');
+        if ($relativeDir !== '.') {
+            $relativeTarget .= '/' . str_replace(DIRECTORY_SEPARATOR, '/', $relativeDir);
+        }
+        $relativeTarget = trim($relativeTarget, '/');
+        $destinationPath = '/' . ($relativeTarget !== '' ? $relativeTarget . '/' : '') . $sourceName;
+
+        if ($destinationFolder->nodeExists($sourceName)) {
+            $existing = $destinationFolder->get($sourceName);
+            if ($existing instanceof Folder) {
+                throw new RuntimeException(sprintf('Destination "%s" already exists as a folder.', $sourceName));
+            }
+
+            if ($removeSource) {
+                @unlink($sourceReal);
+            }
+
+            return [
+                'source' => $sourceName,
+                'name' => $sourceName,
+                'path' => $destinationPath,
+                'skipped' => true,
+            ];
+        }
+
         $stream = @fopen($sourceReal, 'rb');
         if (!is_resource($stream)) {
             throw new RuntimeException(sprintf('Could not read completed download "%s".', $sourceName));
         }
 
         try {
-            $destinationFolder->newFile($destinationName, $stream);
+            $destinationFolder->newFile($sourceName, $stream);
         } finally {
             fclose($stream);
         }
@@ -114,16 +141,11 @@ final class MediaImporter
             @unlink($sourceReal);
         }
 
-        $relativeTarget = trim($targetPath, '/');
-        if ($relativeDir !== '.') {
-            $relativeTarget .= '/' . str_replace(DIRECTORY_SEPARATOR, '/', $relativeDir);
-        }
-        $relativeTarget = trim($relativeTarget, '/');
-
         return [
             'source' => $sourceName,
-            'name' => $destinationName,
-            'path' => '/' . ($relativeTarget !== '' ? $relativeTarget . '/' : '') . $destinationName,
+            'name' => $sourceName,
+            'path' => $destinationPath,
+            'skipped' => false,
         ];
     }
 
@@ -134,7 +156,7 @@ final class MediaImporter
      * yt-dlp exits.
      *
      * @param string[] $skipSources Absolute source paths already imported.
-     * @return array<int, array{source:string,name:string,path:string}>
+     * @return array<int, array{source:string,name:string,path:string,skipped:bool}>
      */
     public function importWorkspace(
         string $uid,
