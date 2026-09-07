@@ -10,7 +10,7 @@ Features include regular HTTP/HTTPS downloads, BitTorrent and magnet downloads t
 
 MediaFetch is based on the original NCDownloader / Net loader project and continues its AGPL-licensed codebase.
     </description>
-    <version>1.0.1</version>
+    <version>1.1.0</version>
     <licence>AGPL-3.0-or-later</licence>
     <author homepage="https://github.com/Happyfeet01">Happyfeet01</author>
     <author homepage="https://github.com/shiningw">Jiaxin Huang</author>
