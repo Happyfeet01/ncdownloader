@@ -56,7 +56,7 @@ export default {
       resetting: false,
       resetLabel: t(APP_ID, "Stop all downloads & reset"),
       resetWorkingLabel: t(APP_ID, "Stopping downloads…"),
-      resetConfirm: t(APP_ID, "Stop all active MediaFetch downloads and clear the live queue? Completed and failed history will be kept."),
+      resetConfirm: t(APP_ID, "Stop all active MediaFetch downloads, clear the live queue and remove failed download history? Completed download history will be kept."),
       uris: {
         ytd_url: helper.generateUrl("/apps/mediafetch/ytdl/new"),
         aria2_url: helper.generateUrl("/apps/mediafetch/new"),
