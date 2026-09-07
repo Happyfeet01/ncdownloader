@@ -85,6 +85,19 @@ class Helper
         return $result->fetchAllAssociative();
     }
 
+    public function getYtdlByUidAndStatus($uid, array $statuses): array
+    {
+        if ($statuses === []) {
+            return [];
+        }
+
+        $allowed = array_map('intval', $statuses);
+        return array_values(array_filter(
+            $this->getYtdlByUid($uid),
+            static fn(array $row): bool => in_array((int) ($row['status'] ?? -1), $allowed, true)
+        ));
+    }
+
     public function getByGid($gid)
     {
         $queryBuilder = $this->conn->getQueryBuilder()
@@ -142,6 +155,15 @@ class Helper
         $query = $this->conn->getQueryBuilder();
         $query->update($this->table)
             ->set('filename', $query->createNamedParameter($filename, IQueryBuilder::PARAM_STR))
+            ->where($query->expr()->eq('gid', $query->createNamedParameter($gid, IQueryBuilder::PARAM_STR)));
+        return $query->executeStatement();
+    }
+
+    public function setData(string $gid, string $data): int
+    {
+        $query = $this->conn->getQueryBuilder();
+        $query->update($this->table)
+            ->set('data', $query->createNamedParameter($data, IQueryBuilder::PARAM_STR))
             ->where($query->expr()->eq('gid', $query->createNamedParameter($gid, IQueryBuilder::PARAM_STR)));
         return $query->executeStatement();
     }
