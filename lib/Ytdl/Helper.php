@@ -74,6 +74,19 @@ class Helper
         return null;
     }
 
+    public function getErrorInfo(string $buffer): ?array
+    {
+        $regex = '/ERROR:\s+\[(?<site>[^\]]+)]\s+(?<id>[^:]+):\s*(?<message>.*)/i';
+        if (preg_match($regex, $buffer, $matches)) {
+            return [
+                'id' => trim((string) $matches['id']),
+                'site' => trim((string) $matches['site']),
+                'message' => trim((string) $matches['message']),
+            ];
+        }
+        return null;
+    }
+
     public function getProgress(string $buffer): ?array
     {
         $progressRegex = '#\[download\]\s+' .
@@ -120,7 +133,7 @@ class Helper
         }
     }
 
-    public function updateAllStatus(int $status, bool $preserveComplete = false): void
+    public function updateAllStatus(int $status, bool $preserveTerminal = false): void
     {
         $this->status = $status;
         $gids = $this->gids;
@@ -129,9 +142,10 @@ class Helper
         }
 
         foreach (array_unique($gids) as $gid) {
-            if ($preserveComplete) {
+            if ($preserveTerminal) {
                 $row = $this->dbconn->getByGid($gid);
-                if ($row && (int) ($row['status'] ?? -1) === ToolsHelper::STATUS['COMPLETE']) {
+                $current = (int) ($row['status'] ?? -1);
+                if (in_array($current, [ToolsHelper::STATUS['COMPLETE'], ToolsHelper::STATUS['ERROR']], true)) {
                     continue;
                 }
             }
@@ -171,12 +185,22 @@ class Helper
 
     public function run(string $buffer, array $extra)
     {
+        if ($errorInfo = $this->getErrorInfo($buffer)) {
+            $this->gid = ToolsHelper::generateGID($errorInfo['id'] . '|' . ($this->jobToken ?? 'mediafetch'));
+            $extra['error'] = $errorInfo['message'];
+            $this->ensureCurrentItem($extra, $errorInfo['id']);
+            $this->dbconn->updateStatus($this->gid, ToolsHelper::STATUS['ERROR']);
+            return;
+        }
+
         $info = $this->getSiteInfo($buffer);
         if (isset($info["id"])) {
             $this->gid = ToolsHelper::generateGID($info["id"] . '|' . ($this->jobToken ?? 'mediafetch'));
+            $this->ensureCurrentItem($extra, $info['id']);
         }
         if (!$this->gid || $this->gid === $this->placeholderGid) {
             $this->gid = ToolsHelper::generateGID($extra["link"] . '|' . ($this->jobToken ?? microtime(true)));
+            $this->ensureCurrentItem($extra, 'Preparing download…');
         }
 
         $downloadInfo = $this->getDownloadInfo($buffer);
@@ -207,11 +231,47 @@ class Helper
             'data' => $this->serializeExtra($extra),
         ];
 
-        $inserted = $this->dbconn->insert($data);
-        if ($inserted && !in_array($this->gid, $this->gids, true)) {
+        $this->dbconn->insert($data);
+        $this->dbconn->setFilename($this->gid, basename($file));
+        $this->dbconn->setData($this->gid, $this->serializeExtra($extra));
+        $this->dbconn->updateStatus($this->gid, ToolsHelper::STATUS['ACTIVE']);
+
+        if (!in_array($this->gid, $this->gids, true)) {
             $this->gids[] = $this->gid;
         }
 
+        $this->removePlaceholder();
+    }
+
+    private function ensureCurrentItem(array $extra, string $label): void
+    {
+        if (!$this->gid) {
+            return;
+        }
+
+        $data = [
+            'uid' => $this->user,
+            'gid' => $this->gid,
+            'type' => ToolsHelper::DOWNLOADTYPE['YOUTUBE-DL'],
+            'filename' => $label !== '' ? $label : 'Preparing download…',
+            'status' => ToolsHelper::STATUS['ACTIVE'],
+            'timestamp' => time(),
+            'speed' => 'Starting',
+            'progress' => '0%',
+            'data' => $this->serializeExtra($extra),
+        ];
+
+        $this->dbconn->insert($data);
+        $this->dbconn->setData($this->gid, $this->serializeExtra($extra));
+        if (!in_array($this->gid, $this->gids, true)) {
+            $this->gids[] = $this->gid;
+        }
+
+        $this->removePlaceholder();
+    }
+
+    private function removePlaceholder(): void
+    {
         if ($this->placeholderGid && $this->placeholderGid !== $this->gid) {
             $this->dbconn->deleteByGid($this->placeholderGid);
             $this->placeholderGid = null;
