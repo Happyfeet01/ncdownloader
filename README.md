@@ -2,7 +2,7 @@
 
 MediaFetch is a download manager for Nextcloud built around **aria2** and **yt-dlp**.
 
-It continues the NCDownloader / Net loader codebase with support for current Nextcloud releases, per-user download settings, yt-dlp media downloads and a maintainable App Store release process.
+It continues the NCDownloader codebase with support for current Nextcloud releases, per-user download settings, yt-dlp media downloads and a maintainable App Store release process.
 
 ## Features
 
